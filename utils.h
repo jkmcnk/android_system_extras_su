@@ -28,3 +28,10 @@ extern int get_property(const char *data, char *found, const char *searchkey,
                         const char *not_found);
 extern int check_property(const char *data, const char *prefix);
 #endif
+
+#define AID_USER 100000        
+#define AID_USER_OFFSET 100000 
+
+#define multiuser_get_user_id(uid) (uid / AID_USER_OFFSET)
+#define multiuser_get_app_id(uid) (uid % AID_USER_OFFSET)
+

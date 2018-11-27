@@ -40,9 +40,7 @@
 #include <termios.h>
 #include <signal.h>
 #include <string.h>
-#include <log/log.h>
-
-#include <cutils/multiuser.h>
+#include <android/log.h>
 
 #include "su.h"
 #include "utils.h"

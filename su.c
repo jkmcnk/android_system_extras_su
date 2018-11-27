@@ -34,112 +34,14 @@
 #include <sys/stat.h>
 #include <stdarg.h>
 #include <sys/types.h>
-#include <log/log.h>
-#include <private/android_filesystem_config.h>
+#include <android/log.h>
 
 #include "su.h"
 #include "utils.h"
-#include "binder/pm-wrapper.h"
 
 extern int is_daemon;
 extern int daemon_from_uid;
 extern int daemon_from_pid;
-
-int fork_zero_fucks() {
-    int pid = fork();
-    if (pid) {
-        int status;
-        waitpid(pid, &status, 0);
-        return pid;
-    }
-    else {
-        if ((pid = fork()))
-            exit(0);
-        return 0;
-    }
-}
-
-static int from_init(struct su_initiator *from) {
-    char path[PATH_MAX], exe[PATH_MAX];
-    char args[4096], *argv0, *argv_rest;
-    int fd;
-    ssize_t len;
-    int i;
-    int err;
-
-    from->uid = getuid();
-    from->pid = getppid();
-
-    if (is_daemon) {
-        from->uid = daemon_from_uid;
-        from->pid = daemon_from_pid;
-    }
-
-    /* Get the command line */
-    snprintf(path, sizeof(path), "/proc/%d/cmdline", from->pid);
-    fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        PLOGE("Opening command line");
-        return -1;
-    }
-    len = read(fd, args, sizeof(args));
-    err = errno;
-    close(fd);
-    if (len < 0 || len == sizeof(args)) {
-        PLOGEV("Reading command line", err);
-        return -1;
-    }
-
-    argv0 = args;
-    argv_rest = NULL;
-    for (i = 0; i < len; i++) {
-        if (args[i] == '\0') {
-            if (!argv_rest) {
-                argv_rest = &args[i+1];
-            } else {
-                args[i] = ' ';
-            }
-        }
-    }
-    args[len] = '\0';
-
-    if (argv_rest) {
-        if (strlcpy(from->args, argv_rest, sizeof(from->args)) >= sizeof(from->args)) {
-            ALOGE("argument too long");
-            return -1;
-        }
-    } else {
-        from->args[0] = '\0';
-    }
-
-    /* If this isn't app_process, use the real path instead of argv[0] */
-    snprintf(path, sizeof(path), "/proc/%d/exe", from->pid);
-    len = readlink(path, exe, sizeof(exe));
-    if (len < 0) {
-        PLOGE("Getting exe path");
-        return -1;
-    }
-    exe[len] = '\0';
-    if (strcmp(exe, "/system/bin/app_process") != 0) {
-        argv0 = exe;
-    }
-
-    if (strlcpy(from->bin, argv0, sizeof(from->bin)) >= sizeof(from->bin)) {
-        ALOGE("binary path too long");
-        return -1;
-    }
-
-    struct passwd *pw;
-    pw = getpwuid(from->uid);
-    if (pw && pw->pw_name) {
-        if (strlcpy(from->name, pw->pw_name, sizeof(from->name)) >= sizeof(from->name)) {
-            ALOGE("name too long");
-            return -1;
-        }
-    }
-
-    return 0;
-}
 
 static void populate_environment(const struct su_context *ctx) {
     struct passwd *pw;
@@ -161,6 +63,20 @@ static void populate_environment(const struct su_context *ctx) {
     }
 }
 
+int fork_zero_fucks() {
+    int pid = fork();
+    if (pid) {
+        int status;
+        waitpid(pid, &status, 0);
+        return pid;
+    }
+    else {
+        if ((pid = fork()))
+            exit(0);
+        return 0;
+    }
+}
+
 void set_identity(unsigned int uid) {
     /*
      * Set effective uid back to root, otherwise setres[ug]id will fail
@@ -178,32 +94,6 @@ void set_identity(unsigned int uid) {
         PLOGE("setresuid (%u)", uid);
         exit(EXIT_FAILURE);
     }
-}
-
-static void usage(int status) {
-    FILE *stream = (status == EXIT_SUCCESS) ? stdout : stderr;
-
-    fprintf(stream,
-    "Usage: su [options] [--] [-] [LOGIN] [--] [args...]\n\n"
-    "Options:\n"
-    "  --daemon                      start the su daemon agent\n"
-    "  -c, --command COMMAND         pass COMMAND to the invoked shell\n"
-    "  -h, --help                    display this help message and exit\n"
-    "  -, -l, --login                pretend the shell to be a login shell\n"
-    "  -m, -p,\n"
-    "  --preserve-environment        do not change environment variables\n"
-    "  -s, --shell SHELL             use SHELL instead of the default " DEFAULT_SHELL "\n"
-    "  -v, --version                 display version number and exit\n"
-    "  -V                            display version code and exit,\n"
-    "                                this is used almost exclusively by Superuser.apk\n");
-    exit(status);
-}
-
-static __attribute__ ((noreturn)) void deny(struct su_context *ctx) {
-    char *cmd = get_command(&ctx->to);
-    ALOGW("request rejected (%u->%u %s)", ctx->from.uid, ctx->to.uid, cmd);
-    fprintf(stderr, "%s\n", strerror(EACCES));
-    exit(EXIT_FAILURE);
 }
 
 static __attribute__ ((noreturn)) void allow(struct su_context *ctx, const char *packageName) {
@@ -275,75 +165,27 @@ static __attribute__ ((noreturn)) void allow(struct su_context *ctx, const char 
         ALOGD("pid %d returned %d.", pid, status);
         code = WIFSIGNALED(status) ? WTERMSIG(status) + 128 : WEXITSTATUS(status);
 
-        if (packageName) {
-            appops_finish_op_su(ctx->from.uid, packageName);
-        }
         exit(code);
     }
 }
 
-/*
- * Lineage-specific behavior
- *
- * we can't simply use the property service, since we aren't launched from init
- * and can't trust the location of the property workspace.
- * Find the properties ourselves.
- */
-int access_disabled(const struct su_initiator *from) {
-    char *data;
-    char build_type[PROPERTY_VALUE_MAX];
-    char debuggable[PROPERTY_VALUE_MAX], enabled[PROPERTY_VALUE_MAX];
-    size_t len;
+static void usage(int status) {
+    FILE *stream = (status == EXIT_SUCCESS) ? stdout : stderr;
 
-    data = read_file("/system/build.prop");
-    /* only allow su on Lineage 15.1 (or newer) builds */
-    if (!(check_property(data, "ro.lineage.version"))) {
-        free(data);
-        ALOGE("Root access disabled on Non-Lineage builds");
-        return 1;
-    }
-
-    get_property(data, build_type, "ro.build.type", "");
-    free(data);
-
-    data = read_file("/default.prop");
-    get_property(data, debuggable, "ro.debuggable", "0");
-    free(data);
-    /* only allow su on debuggable builds */
-    if (strcmp("1", debuggable) != 0) {
-        ALOGE("Root access is disabled on non-debug builds");
-        return 1;
-    }
-
-    data = read_file("/data/property/persist.sys.root_access");
-    if (data != NULL) {
-        len = strlen(data);
-        if (len >= PROPERTY_VALUE_MAX)
-            memcpy(enabled, "0", 2);
-        else
-            memcpy(enabled, data, len + 1);
-        free(data);
-    } else
-        memcpy(enabled, "0", 2);
-
-    /* enforce persist.sys.root_access on non-eng builds for apps */
-    if (strcmp("eng", build_type) != 0 &&
-            from->uid != AID_SHELL && from->uid != AID_ROOT &&
-            (atoi(enabled) & LINEAGE_ROOT_ACCESS_APPS_ONLY) != LINEAGE_ROOT_ACCESS_APPS_ONLY ) {
-        ALOGE("Apps root access is disabled by system setting - "
-             "enable it under settings -> developer options");
-        return 1;
-    }
-
-    /* disallow su in a shell if appropriate */
-    if (from->uid == AID_SHELL &&
-            (atoi(enabled) & LINEAGE_ROOT_ACCESS_ADB_ONLY) != LINEAGE_ROOT_ACCESS_ADB_ONLY ) {
-        ALOGE("Shell root access is disabled by a system setting - "
-             "enable it under settings -> developer options");
-        return 1;
-    }
-
-    return 0;
+    fprintf(stream,
+    "Usage: su [options] [--] [-] [LOGIN] [--] [args...]\n\n"
+    "Options:\n"
+    "  --daemon                      start the su daemon agent\n"
+    "  -c, --command COMMAND         pass COMMAND to the invoked shell\n"
+    "  -h, --help                    display this help message and exit\n"
+    "  -, -l, --login                pretend the shell to be a login shell\n"
+    "  -m, -p,\n"
+    "  --preserve-environment        do not change environment variables\n"
+    "  -s, --shell SHELL             use SHELL instead of the default " DEFAULT_SHELL "\n"
+    "  -v, --version                 display version number and exit\n"
+    "  -V                            display version code and exit,\n"
+    "                                this is used almost exclusively by Superuser.apk\n");
+    exit(status);
 }
 
 static void fork_for_samsung(void)
@@ -369,16 +211,10 @@ static void fork_for_samsung(void)
 }
 
 int main(int argc, char *argv[]) {
-    if (getuid() != geteuid()) {
-        ALOGE("must not be a setuid binary");
-        return 1;
-    }
-
     return su_main(argc, argv, 1);
 }
 
 int su_main(int argc, char *argv[], int need_client) {
-    // start up in daemon mode if prompted
     if (argc == 2 && strcmp(argv[1], "--daemon") == 0) {
         return run_daemon();
     }
@@ -435,7 +271,7 @@ int su_main(int argc, char *argv[], int need_client) {
             .name = "",
         },
         .to = {
-            .uid = AID_ROOT,
+            .uid = 0,
             .login = 0,
             .keepenv = 0,
             .shell = NULL,
@@ -530,39 +366,7 @@ int su_main(int argc, char *argv[], int need_client) {
     }
     ctx.to.optind = optind;
 
-    if (from_init(&ctx.from) < 0) {
-        deny(&ctx);
-    }
-
     ALOGE("SU from: %s", ctx.from.name);
 
-    // the latter two are necessary for stock ROMs like note 2 which do dumb things with su, or crash otherwise
-    if (ctx.from.uid == AID_ROOT) {
-        ALOGD("Allowing root/system/radio.");
-        allow(&ctx, NULL);
-    }
-
-    // check if superuser is disabled completely
-    if (access_disabled(&ctx.from)) {
-        ALOGD("access_disabled");
-        deny(&ctx);
-    }
-
-    // autogrant shell at this point
-    if (ctx.from.uid == AID_SHELL) {
-        ALOGD("Allowing shell.");
-        allow(&ctx, NULL);
-    }
-
-    char *packageName = resolve_package_name(ctx.from.uid);
-    if (packageName) {
-        if (!appops_start_op_su(ctx.from.uid, packageName)) {
-            ALOGD("Allowing via appops.");
-            allow(&ctx, packageName);
-        }
-        free(packageName);
-    }
-
-    ALOGE("Allow chain exhausted, denying request");
-    deny(&ctx);
+    allow(&ctx, NULL);
 }

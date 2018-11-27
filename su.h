@@ -22,13 +22,7 @@
 #ifdef LOG_TAG
 #undef LOG_TAG
 #endif
-#define LOG_TAG "su"
-
-// Lineage-specific behavior
-#define LINEAGE_ROOT_ACCESS_DISABLED      0
-#define LINEAGE_ROOT_ACCESS_APPS_ONLY     1
-#define LINEAGE_ROOT_ACCESS_ADB_ONLY      2
-#define LINEAGE_ROOT_ACCESS_APPS_AND_ADB  3
+#define LOG_TAG "nusu"
 
 #define DAEMON_SOCKET_PATH "/dev/socket/su-daemon/"
 
@@ -92,9 +86,6 @@ static inline char *get_command(const struct su_request *to)
   return DEFAULT_SHELL;
 }
 
-int appops_start_op_su(int uid, const char *pkgName);
-int appops_finish_op_su(int uid, const char *pkgName);
-
 int run_daemon();
 int connect_daemon(int argc, char *argv[], int ppid);
 int su_main(int argc, char *argv[], int need_client);
@@ -109,6 +100,10 @@ int fork_zero_fucks();
 
 #include <errno.h>
 #include <string.h>
+#define ALOGE(fmt,args...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, fmt, ##args)
+#define ALOGW(fmt,args...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, fmt, ##args)
+#define ALOGD(fmt,args...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, fmt, ##args)
+#define ALOGV(fmt,args...) __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, fmt, ##args)
 #define PLOGE(fmt,args...) ALOGE(fmt " failed with %d: %s", ##args, errno, strerror(errno))
 #define PLOGEV(fmt,err,args...) ALOGE(fmt " failed with %d: %s", ##args, err, strerror(err))
 
